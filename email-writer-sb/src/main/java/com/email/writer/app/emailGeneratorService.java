@@ -24,32 +24,69 @@ public class emailGeneratorService {
         this.webClient = webClientBuilder.build();
     }
 
+
     public String generateEmailReply(EmailRequest emailRequest) {
-        //Build the prompt
+        long totalStart = System.nanoTime();
+
+        long promptStart = System.nanoTime();
+
         String prompt = buildPrompt(emailRequest);
 
-        //Craft a request
         Map<String, Object> requestBody = Map.of(
-                "contents", new Object[] {
+                "contents", new Object[]{
                         Map.of("parts", new Object[]{
                                 Map.of("text", prompt)
                         })
                 }
         );
 
+        long requestBuildMs =
+                (System.nanoTime() - promptStart) / 1_000_000;
+
         String finalUrl = geminiApiUrl + "?key=" + geminiApiKey;
-        //Do request and get response
+
+        long geminiStart = System.nanoTime();
+
         String response = webClient.post()
                 .uri(finalUrl)
-                .header("Content-Type","application/json")
+                .header("Content-Type", "application/json")
                 .bodyValue(requestBody)
                 .retrieve()
+                .onStatus(
+                        status -> status.isError(),
+                        clientResponse -> clientResponse.bodyToMono(String.class)
+                                .map(errorBody -> new RuntimeException(
+                                        "Gemini API error "
+                                                + clientResponse.statusCode()
+                                                + ": " + errorBody
+                                ))
+                )
                 .bodyToMono(String.class)
                 .block();
-        //Extract Response and Return
-        return extractResponseContent(response);
 
+        long geminiMs =
+                (System.nanoTime() - geminiStart) / 1_000_000;
+
+        long extractStart = System.nanoTime();
+
+        String result = extractResponseContent(response);
+
+        long extractMs =
+                (System.nanoTime() - extractStart) / 1_000_000;
+
+        long totalMs =
+                (System.nanoTime() - totalStart) / 1_000_000;
+
+        System.out.println("===== EMAIL GENERATION TIMING =====");
+        System.out.println("Prompt + request build: " + requestBuildMs + " ms");
+        System.out.println("Gemini API call: " + geminiMs + " ms");
+        System.out.println("Response extraction: " + extractMs + " ms");
+        System.out.println("Total backend time: " + totalMs + " ms");
+        System.out.println("===================================");
+
+        return result;
     }
+
 
     private String extractResponseContent(String response) {
         try {
@@ -67,13 +104,60 @@ public class emailGeneratorService {
         }
     }
 
+
+
+
     private String buildPrompt(EmailRequest emailRequest) {
-        StringBuilder prompt = new StringBuilder();
-        prompt.append("Generate a professional email reply for the following content. Please don't generate a Subject line ");
-        if (emailRequest.getTone() != null && !emailRequest.getTone().isEmpty()) {
-            prompt.append("Use a ").append(emailRequest.getTone()).append(" tone.");
+        String tone = emailRequest.getTone();
+        String mode = emailRequest.getEmailMode();
+        String content = emailRequest.getEmailContent();
+
+        if (tone == null || tone.isBlank()) {
+            tone = "Professional";
         }
-        prompt.append("\nOriginal email: \n").append(emailRequest.getEmailContent());
-        return prompt.toString();
+
+        if (mode == null || mode.isBlank()) {
+            mode = "WRITE";
+        }
+
+        if ("REPLY".equalsIgnoreCase(mode)) {
+            return """
+                You are an intelligent email reply assistant.
+
+                The user has provided an email they received.
+                Write a suitable reply to that email.
+                - Address the original sender by name only if clearly available.
+                - Respond directly to the sender's message.
+                - Do not invent facts or commitments.
+                - Do not include a subject line.
+                - Return only the email reply.
+
+                Use this tone: %s.
+
+                Received email:
+                %s
+                """.formatted(tone, content);
+        }
+
+        return """
+            You are an intelligent email writing assistant.
+
+            The user wants you to WRITE A NEW EMAIL based on their instructions.
+            Treat the input as notes and instructions for the email, NOT as an
+            email received from another person.
+            Rewrite rough, emotional, informal, or unstructured wording into
+            a clear, appropriate email while preserving the user's intended meaning.
+            Address the recipient specified by the user when available.
+            Include a suitable subject line.
+            Do not invent facts, dates, times, or commitments.
+            Return only the generated email, without explaining your process.
+
+            Use this tone: %s.
+
+            User's instructions:
+            %s
+            """.formatted(tone, content);
     }
+
+
 }
